@@ -12,20 +12,70 @@ The prompt was:
 
 A [Pi](https://github.com/badlogic/pi-mono) extension that serves an HTTP API compatible with the [OpenCode](https://github.com/opencode-ai/opencode) serve protocol. Any client built for the `@opencode-ai/sdk` wire format can drive Pi through this extension.
 
-## Quick Start
+## Installation
+
+### `pi install` from GitHub (recommended)
 
 ```bash
-# Copy to your global extensions
-cp -r opencode-serve-api ~/.pi/agent/extensions/opencode-serve-api
+pi install git:github.com/c10l/pi-opencode-serve-api
+```
 
-# Start Pi normally — the API server starts automatically
+With a specific tag or commit:
+
+```bash
+pi install git:github.com/c10l/pi-opencode-serve-api@v1.0.0
+```
+
+Other supported forms:
+
+```bash
+# SSH
+pi install git:git@github.com:c10l/pi-opencode-serve-api
+
+# HTTPS
+pi install https://github.com/c10l/pi-opencode-serve-api
+```
+
+Project-local install (into `.pi/git/` instead of `~/.pi/agent/git/`):
+
+```bash
+pi install -l git:github.com/c10l/pi-opencode-serve-api
+```
+
+After installing, just start Pi normally — the API server starts automatically:
+
+```bash
 pi
 ```
 
-Or load directly:
+### `settings.json`
+
+Add the repo path to your [settings](https://github.com/badlogic/pi-mono/blob/main/docs/settings.md) (global or project-local):
+
+```json
+// ~/.pi/agent/settings.json or .pi/settings.json
+{
+  "extensions": ["/path/to/pi-opencode-serve-api"]
+}
+```
+
+### Manual
 
 ```bash
-pi -e ./opencode-serve-api/src/index.ts
+git clone https://github.com/c10l/pi-opencode-serve-api.git
+cp -r pi-opencode-serve-api ~/.pi/agent/extensions/pi-opencode-serve-api
+```
+
+### One-off test
+
+```bash
+pi -e /path/to/pi-opencode-serve-api/src/index.ts
+```
+
+### Uninstall
+
+```bash
+pi remove git:github.com/c10l/pi-opencode-serve-api
 ```
 
 ## Configuration
@@ -36,11 +86,11 @@ pi -e ./opencode-serve-api/src/index.ts
 | `--serve-host` | `PI_SERVE_HOST` | `127.0.0.1` | Bind address |
 
 ```bash
-# Custom port
+# Custom port via environment variable
 PI_SERVE_PORT=4321 pi
 
-# Or via flag
-pi --serve-port 4321 -e ./opencode-serve-api/src/index.ts
+# Or via CLI flag (one-off)
+pi --serve-port 4321 -e /path/to/pi-opencode-serve-api/src/index.ts
 ```
 
 ## API Endpoints
