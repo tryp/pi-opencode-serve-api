@@ -53,11 +53,11 @@ import {
     type ServerResponse,
     type Server,
 } from "node:http";
-import { exec as execAsync } from "node:child_process";
-import { join, resolve, relative, basename } from "node:path";
+import { execFile as execFileAsync } from "node:child_process";
+import { join, resolve, relative, basename, sep } from "node:path";
 import { promisify } from "node:util";
 
-const exec = promisify(execAsync);
+const execFile = promisify(execFileAsync);
 
 // ── Utility types ──────────────────────────────────────────────────────
 
@@ -337,12 +337,14 @@ export default function (pi: ExtensionAPI) {
         }
     }
 
-    // ── CORS headers ──────────────────────────────────────────────────
+    // ── Path confinement ───────────────────────────────────────────
 
-    function corsHeaders(res: ServerResponse) {
-        res.setHeader("Access-Control-Allow-Origin", "*");
-        res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
-        res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+    /** Resolve a user-supplied path and verify it stays within activeCwd. */
+    function safePath(fp: string): string | null {
+        const abs = resolve(activeCwd, fp);
+        const root = resolve(activeCwd);
+        if (abs !== root && !abs.startsWith(root + sep)) return null;
+        return abs;
     }
 
     // ── SSE helper ────────────────────────────────────────────────────
@@ -366,8 +368,6 @@ export default function (pi: ExtensionAPI) {
         const url = req.url ?? "/";
         const method = req.method ?? "GET";
         const path = pathname(url);
-
-        corsHeaders(res);
 
         // Preflight
         if (method === "OPTIONS") {
@@ -478,7 +478,7 @@ export default function (pi: ExtensionAPI) {
         // ── VCS ────────────────────────────────────────────────────
         if (path === "/vcs" && method === "GET") {
             try {
-                const { stdout } = await exec("git rev-parse --abbrev-ref HEAD", {
+                const { stdout } = await execFile("git", ["rev-parse", "--abbrev-ref", "HEAD"], {
                     cwd: activeCwd,
                     timeout: 3000,
                 });
@@ -504,18 +504,20 @@ export default function (pi: ExtensionAPI) {
         if (path === "/file/content" && method === "GET") {
             const fp = queryParam(url, "path");
             if (!fp) return badRequest(res, "Missing ?path=");
+            const abs = safePath(fp);
+            if (!abs) return errorResponse(res, 403, "Forbidden", "Path outside project directory");
             try {
-                const abs = resolve(activeCwd, fp);
                 const content = await readFile(abs, "utf8");
                 return jsonResponse(res, { type: "text", content });
-            } catch (e: any) {
-                return notFound(res, e.message);
+            } catch {
+                return notFound(res, "File not found");
             }
         }
         if (path === "/file" && method === "GET") {
             const dir = queryParam(url, "path") ?? ".";
+            const abs = safePath(dir);
+            if (!abs) return errorResponse(res, 403, "Forbidden", "Path outside project directory");
             try {
-                const abs = resolve(activeCwd, dir);
                 const entries = await readdir(abs, { withFileTypes: true });
                 const nodes = await Promise.all(
                     entries
@@ -526,7 +528,6 @@ export default function (pi: ExtensionAPI) {
                                 return {
                                     name: entry.name,
                                     path: relative(activeCwd, full),
-                                    absolute: full,
                                     type: entry.isDirectory() ? "directory" : "file",
                                     ignored: false,
                                 };
@@ -536,8 +537,8 @@ export default function (pi: ExtensionAPI) {
                         }),
                 );
                 return jsonResponse(res, nodes.filter(Boolean));
-            } catch (e: any) {
-                return notFound(res, e.message);
+            } catch {
+                return notFound(res, "Directory not found");
             }
         }
         if (path === "/file/status" && method === "GET") {
@@ -549,8 +550,8 @@ export default function (pi: ExtensionAPI) {
             const pattern = queryParam(url, "pattern") ?? "";
             if (!pattern) return badRequest(res, "Missing ?pattern=");
             try {
-                const { stdout } = await exec(
-                    `grep -rn -- ${JSON.stringify(pattern)} . 2>/dev/null | head -200`,
+                const { stdout } = await execFile(
+                    "grep", ["-rn", "--", pattern, "."],
                     { cwd: activeCwd, maxBuffer: 2 * 1024 * 1024, timeout: 10000 },
                 );
                 const matches = stdout
@@ -583,8 +584,8 @@ export default function (pi: ExtensionAPI) {
         if (path === "/find/file" && method === "GET") {
             const q = queryParam(url, "query") ?? "";
             try {
-                const { stdout } = await exec(
-                    `find . -iname ${JSON.stringify("*" + q + "*")} -not -path '*/node_modules/*' -not -path '*/.git/*' 2>/dev/null | head -200`,
+                const { stdout } = await execFile(
+                    "find", [".", "-iname", `*${q}*`, "-not", "-path", "*/node_modules/*", "-not", "-path", "*/.git/*"],
                     { cwd: activeCwd, maxBuffer: 2 * 1024 * 1024, timeout: 10000 },
                 );
                 return jsonResponse(res, stdout.split("\n").filter(Boolean));
