@@ -1,0 +1,18 @@
+{
+  "name": "opencode-serve-api",
+  "version": "1.0.0",
+  "description": "Pi extension that serves an API compatible with the OpenCode serve API",
+  "keywords": [
+    "pi-package"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/c10l/pi-opencode-serve-api"
+  },
+  "license": "AGPL-v3",
+  "pi": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  }
+}
