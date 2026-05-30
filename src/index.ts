@@ -116,7 +116,7 @@ async function parseJsonBody(req: IncomingMessage): Promise<any> {
 }
 
 function nowUnix(): number {
-    return Math.floor(Date.now() / 1000);
+    return Date.now();
 }
 
 function queryParam(urlPath: string, name: string): string | undefined {
@@ -156,7 +156,7 @@ function entriesToOCMessages(
         const msg = entry.message;
         if (!msg) continue;
 
-        const ts = msg.timestamp ? Math.floor(msg.timestamp / 1000) : nowUnix();
+        const ts = msg.timestamp ? msg.timestamp : nowUnix();
 
         if (msg.role === "user") {
             const textContent =
