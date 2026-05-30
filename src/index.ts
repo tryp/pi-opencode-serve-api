@@ -993,6 +993,14 @@ export default function (pi: ExtensionAPI) {
         },
     });
 
+    pi.registerCommand("reload", {
+        description: "Reload pi configuration",
+        handler: async (_args, ctx) => {
+            elog("/reload command triggered via API");
+            await ctx.reload();
+        },
+    });
+
     // ── Lifecycle ──────────────────────────────────────────────────
 
     pi.on("session_start", async (event, ctx) => {
