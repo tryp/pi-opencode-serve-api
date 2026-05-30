@@ -433,8 +433,40 @@ export default function (pi: ExtensionAPI) {
         res: ServerResponse,
     ) {
         // ── Health ─────────────────────────────────────────────────
-        if (path === "/health" && method === "GET") {
-            return jsonResponse(res, { status: "ok", sessions: sessions.size });
+        if ((path === "/health" || path === "/global/health") && method === "GET") {
+            return jsonResponse(res, { healthy: true, version: "pi-opencode-serve-api/1.0.0" });
+        }
+
+        // ── Project ───────────────────────────────────────────────────
+        if (path === "/project" && method === "GET") {
+            const now = nowUnix();
+            return jsonResponse(res, [
+                {
+                    id: "default",
+                    worktree: activeCwd,
+                    vcs: null as string | null,
+                    vcsDir: null as string | null,
+                    time: { created: now, updated: now },
+                    sandboxes: [] as string[],
+                },
+            ]);
+        }
+        if (path === "/project/current" && method === "GET") {
+            return jsonResponse(res, { worktree: activeCwd });
+        }
+
+        // ── Model ─────────────────────────────────────────────────────
+        if (path === "/model/active" && method === "POST") {
+            return jsonResponse(res, {});
+        }
+
+        // ── Instance ──────────────────────────────────────────────────
+        if (path === "/instance" && method === "GET") {
+            return jsonResponse(res, {
+                id: "pi-opencode-serve",
+                label: "Pi OpenCode Serve",
+                config: {},
+            });
         }
 
         // ── Event streams ──────────────────────────────────────────
