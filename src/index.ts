@@ -341,6 +341,14 @@ export default function (pi: ExtensionAPI) {
         }
     }
 
+    // ── CORS headers ──────────────────────────────────────────────────
+
+    function corsHeaders(res: ServerResponse) {
+        res.setHeader("Access-Control-Allow-Origin", "*");
+        res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS");
+        res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Requested-With");
+    }
+
     // ── Path confinement ───────────────────────────────────────────
 
     /** Resolve a user-supplied path and verify it stays within activeCwd. */
@@ -372,6 +380,9 @@ export default function (pi: ExtensionAPI) {
         const url = req.url ?? "/";
         const method = req.method ?? "GET";
         const path = pathname(url);
+
+        // CORS headers on every response
+        corsHeaders(res);
 
         // Preflight
         if (method === "OPTIONS") {
