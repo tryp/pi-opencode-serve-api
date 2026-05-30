@@ -312,6 +312,7 @@ export default function (pi: ExtensionAPI) {
     let currentSessionId: string = randomUUID();
     const sessions = new Map<string, SessionRecord>();
     const sseClients = new Set<ServerResponse>();
+    const eventBuffer: string[] = [];
     let httpServer: Server | undefined;
     let activeCwd: string = process.cwd();
 
@@ -331,7 +332,10 @@ export default function (pi: ExtensionAPI) {
     }
 
     function broadcast(event: { type: string; properties: any }) {
-        const data = `data: ${JSON.stringify(event)}\n\n`;
+        const data = `data: ${JSON.stringify({ directory: activeCwd, payload: event })}\n\n`;
+        // Buffer for replay on reconnect
+        eventBuffer.push(data);
+        if (eventBuffer.length > 500) eventBuffer.shift();
         for (const res of sseClients) {
             try {
                 res.write(data);
@@ -362,16 +366,36 @@ export default function (pi: ExtensionAPI) {
     // ── SSE helper ────────────────────────────────────────────────────
 
     function startSSE(res: ServerResponse) {
+        elog("SSE client connected, total:", sseClients.size + 1);
         res.writeHead(200, {
             "Content-Type": "text/event-stream",
             "Cache-Control": "no-cache",
             Connection: "keep-alive",
         });
         res.write(
-            `data: ${JSON.stringify({ type: "server.connected", properties: {} })}\n\n`,
+            `data: ${JSON.stringify({ directory: activeCwd, payload: { type: "server.connected", properties: {} } })}\n\n`,
         );
+        // Broadcast existing sessions so the new client discovers them immediately
+        for (const session of sessions.values()) {
+            res.write(
+                `data: ${JSON.stringify({ directory: activeCwd, payload: { type: "session.created", properties: { info: toOCSession(session, activeCwd) } } })}\n\n`,
+            );
+        }
+        // Replay buffered events that arrived while no client was connected
+        if (eventBuffer.length > 0) {
+            elog("replaying", eventBuffer.length, "buffered events to new SSE client");
+            for (const buffered of eventBuffer) {
+                try {
+                    res.write(buffered);
+                } catch { /* ignore */ }
+            }
+            eventBuffer.length = 0;
+        }
         sseClients.add(res);
-        res.on("close", () => sseClients.delete(res));
+        res.on("close", () => {
+            elog("SSE client disconnected, remaining:", sseClients.size - 1);
+            sseClients.delete(res);
+        });
     }
 
     // ── Request router ────────────────────────────────────────────────
@@ -972,12 +996,22 @@ export default function (pi: ExtensionAPI) {
             });
 
             httpServer.listen(port, hostname, () => {
-                console.log(
-                    `opencode server listening on http://${hostname}:${port}`,
-                );
+                elog("server listening on http://" + hostname + ":" + port);
                 ctx.ui.notify(`OpenCode API: http://${hostname}:${port}`, "info");
                 ctx.ui.setStatus("serve-api", `API :${port}`);
             });
+
+            // SSE keepalive heartbeat every 30s
+            setInterval(() => {
+                const hb = `data: ${JSON.stringify({ directory: activeCwd, payload: { type: "keepalive", properties: { time: nowUnix() } } })}\n\n`;
+                for (const res of sseClients) {
+                    try {
+                        res.write(hb);
+                    } catch {
+                        sseClients.delete(res);
+                    }
+                }
+            }, 30000);
         }
     });
 
