@@ -326,6 +326,10 @@ export default function (pi: ExtensionAPI) {
 
     // ── SSE broadcast ─────────────────────────────────────────────────
 
+    function elog(msg: string, ...args: any[]) {
+        console.log(`[${new Date().toISOString()}] [opencode-serve] ${msg}`, ...args);
+    }
+
     function broadcast(event: { type: string; properties: any }) {
         const data = `data: ${JSON.stringify(event)}\n\n`;
         for (const res of sseClients) {
