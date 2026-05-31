@@ -208,6 +208,7 @@ function entriesToOCMessages(
                         messageID: entry.id,
                         type: "reasoning",
                         text: block.thinking ?? "",
+                        time: { start: ts, end: ts },
                     });
                 } else if (block.type === "toolCall") {
                     parts.push({
@@ -317,6 +318,7 @@ export default function (pi: ExtensionAPI) {
     const sseClients = new Set<ServerResponse>();
     const eventBuffer: string[] = [];
     let currentThinkingPartId: string | null = null;
+    let currentThinkingStartTime: number = 0;
     let currentTextPartId: string | null = null;
     let currentAssistantMessageId: string | null = null;
     let httpServer: Server | undefined;
@@ -1138,7 +1140,24 @@ export default function (pi: ExtensionAPI) {
     }
 
     pi.on("agent_end", async (_event, ctx) => {
+        // Finalize any remaining active thinking part
+        if (currentThinkingPartId) {
+            broadcast({
+                type: "message.part.updated",
+                properties: {
+                    part: {
+                        id: currentThinkingPartId,
+                        sessionID: currentSessionId,
+                        messageID: currentAssistantMessageId ?? randomUUID(),
+                        type: "reasoning",
+                        text: "",
+                        time: { start: currentThinkingStartTime, end: nowUnix() },
+                    },
+                },
+            });
+        }
         currentThinkingPartId = null;
+        currentThinkingStartTime = 0;
         currentTextPartId = null;
         refreshMessagesFromSession(ctx);
         const completedMsgId = currentAssistantMessageId;
@@ -1219,6 +1238,22 @@ export default function (pi: ExtensionAPI) {
         const delta = event.assistantMessageEvent;
 
         if (delta.type === "text_delta" && delta.delta) {
+            // Finalize any active thinking part with end time
+            if (currentThinkingPartId) {
+                broadcast({
+                    type: "message.part.updated",
+                    properties: {
+                        part: {
+                            id: currentThinkingPartId,
+                            sessionID: currentSessionId,
+                            messageID: currentAssistantMessageId ?? randomUUID(),
+                            type: "reasoning",
+                            text: "",
+                            time: { start: currentThinkingStartTime, end: nowUnix() },
+                        },
+                    },
+                });
+            }
             currentThinkingPartId = null;
             if (!currentTextPartId) {
                 currentTextPartId = randomUUID();
@@ -1241,6 +1276,7 @@ export default function (pi: ExtensionAPI) {
         if (delta.type === "thinking_delta" && delta.delta) {
             if (!currentThinkingPartId) {
                 currentThinkingPartId = randomUUID();
+                currentThinkingStartTime = nowUnix();
             }
             broadcast({
                 type: "message.part.updated",
@@ -1251,6 +1287,7 @@ export default function (pi: ExtensionAPI) {
                         messageID: currentAssistantMessageId ?? randomUUID(),
                         type: "reasoning",
                         text: delta.delta,
+                        time: { start: currentThinkingStartTime },
                     },
                 },
             });
