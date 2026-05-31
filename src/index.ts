@@ -314,6 +314,8 @@ export default function (pi: ExtensionAPI) {
     const sseClients = new Set<ServerResponse>();
     const eventBuffer: string[] = [];
     let currentThinkingPartId: string | null = null;
+    let currentTextPartId: string | null = null;
+    let currentAssistantMessageId: string | null = null;
     let httpServer: Server | undefined;
     let activeCwd: string = process.cwd();
 
@@ -746,6 +748,7 @@ export default function (pi: ExtensionAPI) {
 
         // POST /session/{id}/message — synchronous prompt
         if (sub === "message" && method === "POST") {
+            elog("POST /session/{id}/message called, sid=", sid);
             const body = await parseJsonBody(req);
             const parts = body.parts ?? [];
             const textParts = parts.filter((p: any) => p.type === "text");
@@ -757,6 +760,7 @@ export default function (pi: ExtensionAPI) {
 
             const userMsgId = randomUUID();
             const assistantMsgId = randomUUID();
+            currentAssistantMessageId = assistantMsgId;
 
             // Broadcast user message event
             broadcast({
@@ -802,6 +806,7 @@ export default function (pi: ExtensionAPI) {
 
         // POST /session/{id}/prompt_async
         if (sub === "prompt_async" && method === "POST") {
+            elog("POST /session/{id}/prompt_async called, sid=", sid);
             const body = await parseJsonBody(req);
             const parts = body.parts ?? [];
             const text = parts
@@ -812,6 +817,9 @@ export default function (pi: ExtensionAPI) {
 
             currentSessionId = sid;
             if (session) session.updatedAt = nowUnix();
+
+            // Generate a stable message ID for streaming SSE events
+            currentAssistantMessageId = randomUUID();
 
             pi.sendUserMessage(text);
 
@@ -1060,6 +1068,21 @@ export default function (pi: ExtensionAPI) {
 
     pi.on("agent_start", async (_event, ctx) => {
         refreshMessagesFromSession(ctx);
+        currentThinkingPartId = null;
+        currentTextPartId = null;
+        // Broadcast an initial assistant message.updated so P4OC creates the message placeholder
+        broadcast({
+            type: "message.updated",
+            properties: {
+                info: {
+                    id: currentAssistantMessageId ?? randomUUID(),
+                    sessionID: currentSessionId,
+                    role: "assistant",
+                    time: { created: nowUnix() },
+                },
+                parts: [],
+            },
+        });
         broadcast({
             type: "session.status",
             properties: {
@@ -1069,9 +1092,39 @@ export default function (pi: ExtensionAPI) {
         });
     });
 
+    function patchCachedMessageIds() {
+        if (!currentAssistantMessageId) return;
+        // Find the last assistant message in cachedMessages and patch its IDs
+        // to match what was sent during SSE streaming
+        for (let i = cachedMessages.length - 1; i >= 0; i--) {
+            const msg = cachedMessages[i];
+            if (msg.info.role === "assistant") {
+                msg.info.id = currentAssistantMessageId;
+                for (const part of msg.parts) {
+                    part.messageID = currentAssistantMessageId;
+                }
+                break;
+            }
+        }
+        currentAssistantMessageId = null;
+    }
+
     pi.on("agent_end", async (_event, ctx) => {
         currentThinkingPartId = null;
+        currentTextPartId = null;
         refreshMessagesFromSession(ctx);
+        const completedMsgId = currentAssistantMessageId;
+        patchCachedMessageIds();
+        // Broadcast the completed assistant message so P4OC has the full content
+        // (patchCachedMessageIds sets currentAssistantMessageId=null, so save it first)
+        const completedAssistantMsg = completedMsgId ? cachedMessages.find((m: any) =>
+            m.info.role === "assistant" && m.info.id === completedMsgId) : null;
+        if (completedAssistantMsg) {
+            broadcast({
+                type: "message.updated",
+                properties: completedAssistantMsg,
+            });
+        }
         broadcast({
             type: "session.status",
             properties: {
@@ -1087,7 +1140,8 @@ export default function (pi: ExtensionAPI) {
 
     pi.on("message_start", async (event, _ctx) => {
         const msg = event.message;
-        if (msg.role === "user") {
+        // Skip user message broadcast if we already broadcast one from POST handler
+        if (msg.role === "user" && !currentAssistantMessageId) {
             broadcast({
                 type: "message.updated",
                 properties: {
@@ -1109,13 +1163,16 @@ export default function (pi: ExtensionAPI) {
 
         if (delta.type === "text_delta" && delta.delta) {
             currentThinkingPartId = null;
+            if (!currentTextPartId) {
+                currentTextPartId = randomUUID();
+            }
             broadcast({
                 type: "message.part.updated",
                 properties: {
                     part: {
-                        id: randomUUID(),
+                        id: currentTextPartId,
                         sessionID: currentSessionId,
-                        messageID: randomUUID(),
+                        messageID: currentAssistantMessageId ?? randomUUID(),
                         type: "text",
                         text: delta.delta,
                     },
@@ -1134,7 +1191,7 @@ export default function (pi: ExtensionAPI) {
                     part: {
                         id: currentThinkingPartId,
                         sessionID: currentSessionId,
-                        messageID: randomUUID(),
+                        messageID: currentAssistantMessageId ?? randomUUID(),
                         type: "reasoning",
                         text: delta.delta,
                     },
@@ -1144,13 +1201,14 @@ export default function (pi: ExtensionAPI) {
 
         if (delta.type === "toolcall_start" && delta.toolCall) {
             currentThinkingPartId = null;
+            currentTextPartId = null;
             broadcast({
                 type: "message.part.updated",
                 properties: {
                     part: {
                         id: randomUUID(),
                         sessionID: currentSessionId,
-                        messageID: randomUUID(),
+                        messageID: currentAssistantMessageId ?? randomUUID(),
                         type: "tool",
                         callID: delta.toolCall.id ?? "",
                         tool: delta.toolCall.name ?? "",
@@ -1172,7 +1230,7 @@ export default function (pi: ExtensionAPI) {
                 part: {
                     id: randomUUID(),
                     sessionID: currentSessionId,
-                    messageID: randomUUID(),
+                    messageID: currentAssistantMessageId ?? randomUUID(),
                     type: "tool",
                     callID: event.toolCallId,
                     tool: event.toolName,
@@ -1199,7 +1257,7 @@ export default function (pi: ExtensionAPI) {
                         part: {
                             id: randomUUID(),
                             sessionID: currentSessionId,
-                            messageID: randomUUID(),
+                            messageID: currentAssistantMessageId ?? randomUUID(),
                             type: "tool",
                             callID: event.toolCallId,
                             tool: event.toolName,
@@ -1231,7 +1289,7 @@ export default function (pi: ExtensionAPI) {
                 part: {
                     id: randomUUID(),
                     sessionID: currentSessionId,
-                    messageID: randomUUID(),
+                    messageID: currentAssistantMessageId ?? randomUUID(),
                     type: "tool",
                     callID: event.toolCallId,
                     tool: event.toolName,
