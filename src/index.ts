@@ -338,7 +338,14 @@ export default function (pi: ExtensionAPI) {
         const ev = event.id
             ? event
             : { ...event, id: "evt_" + randomUUID() };
-        const data = `data: ${JSON.stringify(ev)}\n\n`;
+        // P4OC routes events by directory — wrap in {directory, payload} format
+        // so workspace-scoped subscribers (WorkspaceKey.Directory) receive the event.
+        // Without this, events have directory=null → WorkspaceKey.Global → filtered out.
+        const wrapped = {
+            directory: activeCwd,
+            payload: ev,
+        };
+        const data = `data: ${JSON.stringify(wrapped)}\n\n`;
         // Buffer for replay on reconnect
         eventBuffer.push(data);
         if (eventBuffer.length > 500) eventBuffer.shift();
@@ -379,12 +386,12 @@ export default function (pi: ExtensionAPI) {
             Connection: "keep-alive",
         });
         res.write(
-            `data: ${JSON.stringify({ id: "evt_" + randomUUID(), type: "server.connected", properties: {} })}\n\n`,
+            `data: ${JSON.stringify({ directory: activeCwd, payload: { id: "evt_" + randomUUID(), type: "server.connected", properties: {} } })}\n\n`,
         );
         // Broadcast existing sessions so the new client discovers them immediately
         for (const session of sessions.values()) {
             res.write(
-                `data: ${JSON.stringify({ id: "evt_" + randomUUID(), type: "session.created", properties: { info: toOCSession(session, activeCwd) } })}\n\n`,
+                `data: ${JSON.stringify({ directory: activeCwd, payload: { id: "evt_" + randomUUID(), type: "session.created", properties: { info: toOCSession(session, activeCwd) } } })}\n\n`,
             );
         }
         // Replay buffered events that arrived while no client was connected
