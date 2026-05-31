@@ -333,10 +333,20 @@ export default function (pi: ExtensionAPI) {
     };
     sessions.set(currentSessionId, defaultSession);
 
-    // ── SSE broadcast ─────────────────────────────────────────────────
+    // ── Logging ────────────────────────────────────────────────────────
+
+    const debugLogging = (process.env.OPENCODE_LOG_LEVEL as string) === "debug"
+        || (process.env.DEBUG as string)?.includes("opencode-serve")
+        || false;
 
     function elog(msg: string, ...args: any[]) {
         console.log(`[${new Date().toISOString()}] [opencode-serve] ${msg}`, ...args);
+    }
+
+    function dlog(msg: string, ...args: any[]) {
+        if (debugLogging) {
+            console.log(`[${new Date().toISOString()}] [opencode-serve:debug] ${msg}`, ...args);
+        }
     }
 
     function broadcast(event: { type: string; properties: any; id?: string }) {
@@ -422,7 +432,7 @@ export default function (pi: ExtensionAPI) {
         const url = req.url ?? "/";
         const method = req.method ?? "GET";
         const path = pathname(url);
-        elog("HTTP", req.method, req.url);
+        dlog("HTTP", req.method, req.url);
 
         // CORS headers on every response
         corsHeaders(res);
