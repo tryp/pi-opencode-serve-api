@@ -306,7 +306,7 @@ export default function (pi: ExtensionAPI) {
     const hostname =
         (process.env.PI_SERVE_HOST as string) ??
         (pi.getFlag("--serve-host") as string) ??
-        "127.0.0.1";
+        "0.0.0.0";
 
     // ── State ─────────────────────────────────────────────────────────
     let currentSessionId: string = randomUUID();
@@ -334,8 +334,11 @@ export default function (pi: ExtensionAPI) {
         console.log(`[${new Date().toISOString()}] [opencode-serve] ${msg}`, ...args);
     }
 
-    function broadcast(event: { type: string; properties: any }) {
-        const data = `data: ${JSON.stringify(event)}\n\n`;
+    function broadcast(event: { type: string; properties: any; id?: string }) {
+        const ev = event.id
+            ? event
+            : { ...event, id: "evt_" + randomUUID() };
+        const data = `data: ${JSON.stringify(ev)}\n\n`;
         // Buffer for replay on reconnect
         eventBuffer.push(data);
         if (eventBuffer.length > 500) eventBuffer.shift();
@@ -376,12 +379,12 @@ export default function (pi: ExtensionAPI) {
             Connection: "keep-alive",
         });
         res.write(
-            `data: ${JSON.stringify({ type: "server.connected", properties: {} })}\n\n`,
+            `data: ${JSON.stringify({ id: "evt_" + randomUUID(), type: "server.connected", properties: {} })}\n\n`,
         );
         // Broadcast existing sessions so the new client discovers them immediately
         for (const session of sessions.values()) {
             res.write(
-                `data: ${JSON.stringify({ type: "session.created", properties: { info: toOCSession(session, activeCwd) } })}\n\n`,
+                `data: ${JSON.stringify({ id: "evt_" + randomUUID(), type: "session.created", properties: { info: toOCSession(session, activeCwd) } })}\n\n`,
             );
         }
         // Replay buffered events that arrived while no client was connected
@@ -407,6 +410,7 @@ export default function (pi: ExtensionAPI) {
         const url = req.url ?? "/";
         const method = req.method ?? "GET";
         const path = pathname(url);
+        elog("HTTP", req.method, req.url);
 
         // CORS headers on every response
         corsHeaders(res);
@@ -1083,6 +1087,20 @@ export default function (pi: ExtensionAPI) {
                 parts: [],
             },
         });
+        // step-start to signal SDK that a new step is beginning
+        broadcast({
+            type: "message.part.updated",
+            properties: {
+                sessionID: currentSessionId,
+                part: {
+                    id: "prt_" + randomUUID(),
+                    messageID: currentAssistantMessageId ?? randomUUID(),
+                    sessionID: currentSessionId,
+                    type: "step-start",
+                    text: "",
+                },
+            },
+        });
         broadcast({
             type: "session.status",
             properties: {
@@ -1115,12 +1133,45 @@ export default function (pi: ExtensionAPI) {
         refreshMessagesFromSession(ctx);
         const completedMsgId = currentAssistantMessageId;
         patchCachedMessageIds();
+        // Send step-finish to signal the SDK that response generation is complete
+        broadcast({
+            id: "evt_" + randomUUID(),
+            type: "message.part.updated",
+            properties: {
+                sessionID: currentSessionId,
+                part: {
+                    id: "prt_" + randomUUID(),
+                    messageID: completedMsgId ?? randomUUID(),
+                    sessionID: currentSessionId,
+                    type: "step-finish",
+                    reason: "stop",
+                    text: "",
+                    time: { start: nowUnix(), end: nowUnix() },
+                },
+            },
+        });
+        // Send patch for final content update
+        broadcast({
+            id: "evt_" + randomUUID(),
+            type: "message.part.updated",
+            properties: {
+                sessionID: currentSessionId,
+                part: {
+                    id: "prt_" + randomUUID(),
+                    messageID: completedMsgId ?? randomUUID(),
+                    sessionID: currentSessionId,
+                    type: "patch",
+                    text: "",
+                },
+            },
+        });
         // Broadcast the completed assistant message so P4OC has the full content
         // (patchCachedMessageIds sets currentAssistantMessageId=null, so save it first)
         const completedAssistantMsg = completedMsgId ? cachedMessages.find((m: any) =>
             m.info.role === "assistant" && m.info.id === completedMsgId) : null;
         if (completedAssistantMsg) {
             broadcast({
+                id: "evt_" + randomUUID(),
                 type: "message.updated",
                 properties: completedAssistantMsg,
             });
