@@ -846,17 +846,16 @@ export default function (pi: ExtensionAPI) {
 
         // GET /session/{id}/message — list messages
         if (sub === "message" && method === "GET") {
-            // Read from Pi's session manager via the stored closure
-            // We need to access sessionManager, but it's on ctx which we don't have here.
-            // We store the latest entries periodically.
-            return jsonResponse(res, cachedMessages);
+            const msgs = cachedMessages.get(sid) ?? [];
+            return jsonResponse(res, msgs);
         }
 
         // GET /session/{id}/message/{messageID}
         const singleMsg = sub.match(/^message\/([^/]+)$/);
         if (singleMsg && method === "GET") {
             const mid = singleMsg[1];
-            const found = cachedMessages.find(
+            const msgs = cachedMessages.get(sid) ?? [];
+            const found = msgs.find(
                 (m: any) => m.info.id === mid,
             );
             if (!found) return notFound(res, `Message ${mid} not found`);
@@ -975,14 +974,14 @@ export default function (pi: ExtensionAPI) {
 
     // ── Message cache (updated from Pi events) ─────────────────────
 
-    let cachedMessages: Array<{ info: any; parts: any[] }> = [];
+    let cachedMessages: Map<string, Array<{ info: any; parts: any[] }>> = new Map();
 
     function refreshMessagesFromSession(ctx: any) {
         try {
             const sm = ctx.sessionManager;
             if (!sm) return;
             const entries = sm.getBranch();
-            cachedMessages = entriesToOCMessages(entries, currentSessionId);
+            cachedMessages.set(currentSessionId, entriesToOCMessages(entries, currentSessionId));
         } catch {
             // sessionManager may not be available in all contexts
         }
@@ -1126,8 +1125,9 @@ export default function (pi: ExtensionAPI) {
         if (!currentAssistantMessageId) return;
         // Find the last assistant message in cachedMessages and patch its IDs
         // to match what was sent during SSE streaming
-        for (let i = cachedMessages.length - 1; i >= 0; i--) {
-            const msg = cachedMessages[i];
+        const msgs = cachedMessages.get(currentSessionId) ?? [];
+        for (let i = msgs.length - 1; i >= 0; i--) {
+            const msg = msgs[i];
             if (msg.info.role === "assistant") {
                 msg.info.id = currentAssistantMessageId;
                 for (const part of msg.parts) {
@@ -1181,7 +1181,7 @@ export default function (pi: ExtensionAPI) {
         });
         // Broadcast the completed assistant message so P4OC has the full content
         // (patchCachedMessageIds sets currentAssistantMessageId=null, so save it first)
-        const completedAssistantMsg = completedMsgId ? cachedMessages.find((m: any) =>
+        const completedAssistantMsg = completedMsgId ? (cachedMessages.get(currentSessionId) ?? []).find((m: any) =>
             m.info.role === "assistant" && m.info.id === completedMsgId) : null;
         if (completedAssistantMsg) {
             broadcast({
