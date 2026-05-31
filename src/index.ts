@@ -618,6 +618,7 @@ export default function (pi: ExtensionAPI) {
                                 return {
                                     name: entry.name,
                                     path: relative(activeCwd, full),
+                                    absolute: full,
                                     type: entry.isDirectory() ? "directory" : "file",
                                     ignored: false,
                                 };
