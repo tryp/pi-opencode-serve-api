@@ -176,7 +176,7 @@ function entriesToOCMessages(
                     role: "user",
                     time: { created: ts },
                     agent: "coder",
-                    model: {},
+                    model: null,
                 },
                 parts: [
                     {
@@ -230,6 +230,8 @@ function entriesToOCMessages(
             }
 
             const usage = msg.usage ?? {};
+            const modelID = msg.model ?? "";
+            const providerID = msg.provider ?? "";
             results.push({
                 info: {
                     id: entry.id,
@@ -237,8 +239,9 @@ function entriesToOCMessages(
                     role: "assistant",
                     time: { created: ts, completed: ts },
                     parentID: "",
-                    modelID: msg.model ?? "",
-                    providerID: msg.provider ?? "",
+                    modelID: modelID,
+                    providerID: providerID,
+                    model: modelID ? { providerID, modelID } : null,
                     mode: "build",
                     path: { cwd: "", root: "" },
                     cost: usage.cost?.total ?? 0,
@@ -1154,21 +1157,6 @@ export default function (pi: ExtensionAPI) {
                     reason: "stop",
                     text: "",
                     time: { start: nowUnix(), end: nowUnix() },
-                },
-            },
-        });
-        // Send patch for final content update
-        broadcast({
-            id: "evt_" + randomUUID(),
-            type: "message.part.updated",
-            properties: {
-                sessionID: currentSessionId,
-                part: {
-                    id: "prt_" + randomUUID(),
-                    messageID: completedMsgId ?? randomUUID(),
-                    sessionID: currentSessionId,
-                    type: "patch",
-                    text: "",
                 },
             },
         });
