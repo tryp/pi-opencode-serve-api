@@ -1187,6 +1187,17 @@ export default function (pi: ExtensionAPI) {
             type: "session.idle",
             properties: { sessionID: currentSessionId },
         });
+        // Send session.updated with full session info (cost, tokens, agent, model)
+        const currentSess = sessions.get(currentSessionId);
+        if (currentSess) {
+            broadcast({
+                type: "session.updated",
+                properties: {
+                    sessionID: currentSessionId,
+                    info: toOCSession(currentSess, activeCwd),
+                },
+            });
+        }
     });
 
     pi.on("message_start", async (event, _ctx) => {
