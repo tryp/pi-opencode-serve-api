@@ -981,7 +981,16 @@ export default function (pi: ExtensionAPI) {
             const sm = ctx.sessionManager;
             if (!sm) return;
             const entries = sm.getBranch();
-            cachedMessages.set(currentSessionId, entriesToOCMessages(entries, currentSessionId));
+            // Pi has a single session internally. When P4OC creates a new session,
+            // we create it in our sessions Map but pi still appends to its own
+            // session history. Filter messages so each P4OC session only sees
+            // messages created after that session was created.
+            const sess = sessions.get(currentSessionId);
+            const since = sess?.createdAt ?? 0;
+            const filtered = entries.filter((entry: any) => {
+                return entry.message?.timestamp >= since;
+            });
+            cachedMessages.set(currentSessionId, entriesToOCMessages(filtered, currentSessionId));
         } catch {
             // sessionManager may not be available in all contexts
         }
