@@ -313,6 +313,7 @@ export default function (pi: ExtensionAPI) {
     const sessions = new Map<string, SessionRecord>();
     const sseClients = new Set<ServerResponse>();
     const eventBuffer: string[] = [];
+    let currentThinkingPartId: string | null = null;
     let httpServer: Server | undefined;
     let activeCwd: string = process.cwd();
 
@@ -332,7 +333,7 @@ export default function (pi: ExtensionAPI) {
     }
 
     function broadcast(event: { type: string; properties: any }) {
-        const data = `data: ${JSON.stringify({ directory: activeCwd, payload: event })}\n\n`;
+        const data = `data: ${JSON.stringify(event)}\n\n`;
         // Buffer for replay on reconnect
         eventBuffer.push(data);
         if (eventBuffer.length > 500) eventBuffer.shift();
@@ -373,12 +374,12 @@ export default function (pi: ExtensionAPI) {
             Connection: "keep-alive",
         });
         res.write(
-            `data: ${JSON.stringify({ directory: activeCwd, payload: { type: "server.connected", properties: {} } })}\n\n`,
+            `data: ${JSON.stringify({ type: "server.connected", properties: {} })}\n\n`,
         );
         // Broadcast existing sessions so the new client discovers them immediately
         for (const session of sessions.values()) {
             res.write(
-                `data: ${JSON.stringify({ directory: activeCwd, payload: { type: "session.created", properties: { info: toOCSession(session, activeCwd) } } })}\n\n`,
+                `data: ${JSON.stringify({ type: "session.created", properties: { info: toOCSession(session, activeCwd) } })}\n\n`,
             );
         }
         // Replay buffered events that arrived while no client was connected
@@ -1043,7 +1044,7 @@ export default function (pi: ExtensionAPI) {
 
             // SSE keepalive heartbeat every 30s
             setInterval(() => {
-                const hb = `data: ${JSON.stringify({ directory: activeCwd, payload: { type: "keepalive", properties: { time: nowUnix() } } })}\n\n`;
+                const hb = `data: ${JSON.stringify({ type: "keepalive", properties: { time: nowUnix() } })}\n\n`;
                 for (const res of sseClients) {
                     try {
                         res.write(hb);
@@ -1069,6 +1070,7 @@ export default function (pi: ExtensionAPI) {
     });
 
     pi.on("agent_end", async (_event, ctx) => {
+        currentThinkingPartId = null;
         refreshMessagesFromSession(ctx);
         broadcast({
             type: "session.status",
@@ -1106,6 +1108,7 @@ export default function (pi: ExtensionAPI) {
         const delta = event.assistantMessageEvent;
 
         if (delta.type === "text_delta" && delta.delta) {
+            currentThinkingPartId = null;
             broadcast({
                 type: "message.part.updated",
                 properties: {
@@ -1122,11 +1125,14 @@ export default function (pi: ExtensionAPI) {
         }
 
         if (delta.type === "thinking_delta" && delta.delta) {
+            if (!currentThinkingPartId) {
+                currentThinkingPartId = randomUUID();
+            }
             broadcast({
                 type: "message.part.updated",
                 properties: {
                     part: {
-                        id: randomUUID(),
+                        id: currentThinkingPartId,
                         sessionID: currentSessionId,
                         messageID: randomUUID(),
                         type: "reasoning",
@@ -1137,6 +1143,7 @@ export default function (pi: ExtensionAPI) {
         }
 
         if (delta.type === "toolcall_start" && delta.toolCall) {
+            currentThinkingPartId = null;
             broadcast({
                 type: "message.part.updated",
                 properties: {
