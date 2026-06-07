@@ -303,7 +303,7 @@ export default function (pi: ExtensionAPI) {
     // ── Config ────────────────────────────────────────────────────────
     const port = parseInt(
         (process.env.PI_SERVE_PORT as string) ??
-            (pi.getFlag("--serve-port") as string) ??
+            (pi.getFlag("serve-port") as string) ??
             "4096",
         10,
     );
@@ -322,6 +322,7 @@ export default function (pi: ExtensionAPI) {
     let currentTextPartId: string | null = null;
     let currentAssistantMessageId: string | null = null;
     let httpServer: Server | undefined;
+    let commandCtx: any = null;
     let activeCwd: string = process.cwd();
 
     // Create default session
@@ -917,9 +918,46 @@ export default function (pi: ExtensionAPI) {
         // POST /session/{id}/command
         if (sub === "command" && method === "POST") {
             const body = await parseJsonBody(req);
-            const cmd = body.command ?? "";
+            const cmdRaw = body.command ?? "";
+            const cmd = cmdRaw.startsWith("/") ? cmdRaw.slice(1) : cmdRaw;
             const args = body.arguments ?? "";
+            elog(`command: cmdRaw="${cmdRaw}" cmd="${cmd}" args="${args}" commandCtx=${commandCtx ? "primed" : "null"}`);
             if (session) session.updatedAt = nowUnix();
+
+            // Handle reload specially: try direct ctx.reload() if primed
+            if (cmd === "reload" || cmd === "reload-runtime") {
+                if (commandCtx) {
+                    elog("reload via commandCtx.reload()");
+                    await commandCtx.reload();
+                    // After reload, this extension instance is torn down.
+                    // The response below won't execute if reload actually happened.
+                }
+                return jsonResponse(res, {
+                    info: {
+                        id: randomUUID(),
+                        sessionID: sid,
+                        role: "assistant",
+                        time: { created: nowUnix() },
+                        parentID: "",
+                        modelID: "",
+                        providerID: "",
+                        mode: "build",
+                        path: { cwd: activeCwd, root: "/" },
+                        cost: 0,
+                        tokens: {
+                            input: 0,
+                            output: 0,
+                            reasoning: 0,
+                            cache: { read: 0, write: 0 },
+                        },
+                    },
+                    parts: commandCtx
+                        ? [{ id: randomUUID(), type: "text", text: "Reloading..." }]
+                        : [{ id: randomUUID(), type: "text", text: "Reload not primed yet. Type `/reload-runtime` at the pi prompt once, then retry from the app." }],
+                });
+            }
+
+            elog(`command fallback: sending /${cmd} to agent`);
             pi.sendUserMessage(`/${cmd} ${args}`);
             return jsonResponse(res, {
                 info: {
@@ -1037,10 +1075,20 @@ export default function (pi: ExtensionAPI) {
         },
     });
 
+    pi.registerCommand("reload-runtime", {
+        description: "Reload pi extensions, skills, prompts, and themes",
+        handler: async (_args, ctx) => {
+            commandCtx = ctx;
+            elog("reload-runtime command handler fired");
+            await ctx.reload();
+        },
+    });
+
     pi.registerCommand("reload", {
         description: "Reload pi configuration",
         handler: async (_args, ctx) => {
-            elog("/reload command triggered via API");
+            commandCtx = ctx;
+            elog("/reload command triggered via API, calling ctx.reload()");
             await ctx.reload();
         },
     });
@@ -1049,6 +1097,15 @@ export default function (pi: ExtensionAPI) {
 
     pi.on("session_start", async (event, ctx) => {
         activeCwd = ctx.cwd;
+
+        // Verify command is registered
+        try {
+            const cmds = pi.getCommands();
+            const names = cmds.map((c: any) => c.name);
+            elog("session_start: registered commands=" + JSON.stringify(names));
+        } catch (e) {
+            elog("session_start: getCommands error=" + String(e));
+        }
 
         // Update session record with real session info
         const sm = ctx.sessionManager;
@@ -1390,11 +1447,13 @@ export default function (pi: ExtensionAPI) {
     });
 
     pi.on("tool_execution_end", async (event, _ctx) => {
-        const output = event.result
-            ? event.result.content
-                  .filter((c: any) => c.type === "text")
-                  .map((c: any) => c.text)
-                  .join("\n")
+        const output = event.result?.content
+            ? (Array.isArray(event.result.content)
+                  ? event.result.content
+                        .filter((c: any) => c.type === "text")
+                        .map((c: any) => c.text)
+                        .join("\n")
+                  : String(event.result.content))
             : "";
 
         broadcast({
