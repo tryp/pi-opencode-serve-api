@@ -1821,15 +1821,16 @@ export default function (pi: ExtensionAPI) {
             currentThinkingPartId = null;
             currentThinkingText = "";
             currentTextPartId = null;
+            const toolCallId = delta.toolCall.id ?? "";
             broadcast({
                 type: "message.part.updated",
                 properties: {
                     part: {
-                        id: randomUUID(),
+                        id: "tool_" + toolCallId,
                         sessionID: currentSessionId,
                         messageID: currentAssistantMessageId ?? randomUUID(),
                         type: "tool",
-                        callID: delta.toolCall.id ?? "",
+                        callID: toolCallId,
                         tool: delta.toolCall.name ?? "",
                         state: {
                             status: "running",
@@ -1847,11 +1848,14 @@ export default function (pi: ExtensionAPI) {
     const permissionToolNames = ["bash", "edit", "write", "execute_command"];
 
     pi.on("tool_execution_start", async (event, _ctx) => {
+        // Use the tool call ID as part ID so all lifecycle events (start/update/end)
+        // update the same part. The client matches parts by id in upsertPart().
+        const toolPartId = "tool_" + event.toolCallId;
         broadcast({
             type: "message.part.updated",
             properties: {
                 part: {
-                    id: randomUUID(),
+                    id: toolPartId,
                     sessionID: currentSessionId,
                     messageID: currentAssistantMessageId ?? randomUUID(),
                     type: "tool",
@@ -1892,11 +1896,12 @@ export default function (pi: ExtensionAPI) {
                 .map((c: any) => c.text)
                 .join("\n");
             if (text) {
+                const toolPartId = "tool_" + event.toolCallId;
                 broadcast({
                     type: "message.part.updated",
                     properties: {
                         part: {
-                            id: randomUUID(),
+                            id: toolPartId,
                             sessionID: currentSessionId,
                             messageID: currentAssistantMessageId ?? randomUUID(),
                             type: "tool",
@@ -1926,11 +1931,12 @@ export default function (pi: ExtensionAPI) {
                   : String(event.result.content))
             : "";
 
+        const toolPartId = "tool_" + event.toolCallId;
         broadcast({
             type: "message.part.updated",
             properties: {
                 part: {
-                    id: randomUUID(),
+                    id: toolPartId,
                     sessionID: currentSessionId,
                     messageID: currentAssistantMessageId ?? randomUUID(),
                     type: "tool",
