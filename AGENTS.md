@@ -1,6 +1,6 @@
 # AGENTS.md — OpenCode Serve API (Pi Extension)
 
-> **Last updated**: 2026-06-08 — All 6 phases implemented. Server starts immediately (no session_start dependency) for reload compatibility. See §8 for status.
+> **Last updated**: 2026-06-08 — All 6 phases implemented. Server starts immediately (no session_start dependency) for reload compatibility. SSE event flow test harness with reference capture and comparison added. See §8 for status.
 >
 > **IMPORTANT**: This file is the central agent guidance document. Keep it focused
 > on what agents need to know right now. Detailed reference content lives in
@@ -56,6 +56,10 @@ produces. When in doubt, run both servers and compare.
 | `src/index.ts` | Main extension: HTTP server, SSE bridge, event mapping |
 | `doc/plans/opencode-api-parity.md` | Full gap analysis and phased implementation plan |
 | `package.json` | Pi extension manifest (name: `opencode-serve-api`) |
+| `test/smoke.sh` | Bash smoke tests covering all REST endpoints |
+| `test/sse-harness.mjs` | Reusable SSE event flow test harness (capture, compare, snapshot) |
+| `test/run-sse-tests.sh` | Shell orchestrator wrapping sse-harness.mjs with auto-server mgmt |
+| `test/snapshots/` | Reference SSE event capture snapshots (JSONL format) |
 
 ### 2.3 Architecture
 
@@ -243,6 +247,108 @@ Build a unit test suite codifying observed opencode server behavior:
 5. **Regression harness** — re-run the full test suite after every phase;
    a passing suite means we haven't regressed against the reference.
 
+### 5.6 SSE Event Flow Test Harness
+
+The `test/sse-harness.mjs` library and `test/run-sse-tests.sh` orchestrator
+provide automated SSE event stream capture and comparison for both the
+reference opencode server and our pi extension.
+
+**Architecture:**
+```
+        test/run-sse-tests.sh  (orchestrator)
+                 |
+        test/sse-harness.mjs   (core Node.js library)
+                 |
+   ┌─────────────┼─────────────┐
+   v             v             v
+ capture      test         compare
+ (server)   (vs snapshot)  (2 snapshots)
+```
+
+**Key discovery:** Pi's interactive TUI mode prevents the HTTP server's
+`listen()` callback from firing, so the extension must be started in
+`--mode rpc` with stdin piped from a process that never exits (e.g.,
+`sleep infinity | pi ...` or Node.js `"pipe"` stdio with the write end
+kept open).
+
+**Quickstart:**
+```bash
+# Full self-test cycle (start extension, capture, self-verify)
+./test/run-sse-tests.sh self-test --message "Say hello"
+
+# Capture a reference snapshot from a running server
+./test/run-sse-tests.sh capture --port 4096 --snapshot test/snapshots/ref.jsonl
+
+# Test against a reference snapshot (requires running server)
+./test/run-sse-tests.sh test --snapshot test/snapshots/ref.jsonl
+
+# List available snapshots
+./test/run-sse-tests.sh list
+```
+
+**Comparison modes:**
+- `type-order` (default) — Compares core event types
+  (`message.updated`, `message.part.updated`, `session.idle`, etc.) in
+  order, ignoring state-dependent events with variable counts
+  (`session.created`, `server.connected`, `vcs.branch.updated`).
+- `strict` — Full structural comparison with dynamic field placeholder
+  matching (UUIDs, timestamps, event IDs are replaced with
+  `«dynamic:...»` placeholders).
+
+**Snapshot format (JSONL):**
+```jsonl
+{"_snapshot":{"createdAt":"...","count":29,"types":["server.connected","session.created","."."]}}
+{"type":"server.connected","properties":{}}
+{"type":"session.created","properties":{"info":{"id":"...","title":""}}}
+{"type":"message.updated","properties":{...}}
+```
+
+**Programmatic usage (for agents):**
+```javascript
+import { capture, test, compareEventTypes } from "./test/sse-harness.mjs";
+
+// Capture reference
+const { events } = await capture({ port: 4096, snapshot: "ref.jsonl" });
+
+// Test against snapshot
+const { pass, result } = await test({ port: 4096, snapshot: "ref.jsonl" });
+```
+
+**Reference server capture:**
+```bash
+# Capture from reference opencode (requires Go and opencode source)
+./test/run-sse-tests.sh capture-reference --message "Write hello.py"
+
+# Or manually, then use compare mode
+./test/run-sse-tests.sh compare \
+  --actual test/snapshots/our-capture.jsonl \
+  --expected test/snapshots/ref-capture.jsonl
+```
+
+**Important notes:**
+- The prompt format must be `{parts: [{type: "text", text: "..."}]}`
+  (the OpenCode wire format), not a flat `{message: "..."}`.
+- `prompt_async` returns 204 No Content — the harness handles this.
+- `session.created` counts vary between captures (each SSE connection
+  replays existing sessions). The `type-order` mode handles this.
+- Old snapshots accumulate in `test/snapshots/` — clean up manually or
+  via `rm test/snapshots/old-*.jsonl`.
+
+Build a unit test suite codifying observed opencode server behavior:
+
+1. **Snapshot response shapes** — curl each endpoint on the reference server
+   and save the JSON. Our implementation must produce isomorphic JSON.
+2. **Event stream recording** — send a prompt to the reference server, capture
+   the SSE event sequence. Write tests asserting our server emits the same
+   sequence of event types and property fields.
+3. **Edge case coverage** — test empty sessions, missing fields, invalid IDs,
+   concurrent connections, and SSE reconnection against the reference.
+4. **Use agents to discover behavior** — delegate a reference-server exploration
+   pass to a sub-agent: hit every endpoint, record responses, then define test
+   cases from the observations. If a test fails, the agent debugs the mismatch.
+5. **Regression harness** — re-run the full test suite after every phase;
+   a passing suite means we haven't regressed against the reference.
+
 ---
 
 ## 6. Implementation Phases
@@ -305,7 +411,8 @@ Pi doesn't have a native abort mechanism for in-flight agent turns.
 
 **All 6 phases from `doc/plans/opencode-api-parity.md` have been implemented.**
 The extension now serves ~75 REST endpoints across all OpenCode API domains,
-emits ~20 SSE event types, and includes a comprehensive smoke test suite.
+emits ~20 SSE event types, and includes a comprehensive smoke test suite
+and automated SSE event flow test harness.
 
 ### 8.1 Phase 1 — Critical P4OC Fixes (DONE)
 
@@ -377,13 +484,13 @@ All 16 items implemented in `src/index.ts`:
 | 42 | Error helpers (`authError`, `serverError`) | Done |
 | 43 | Debug logging (`OPENCODE_LOG_LEVEL=debug`) | Done |
 
-### 8.6 Phase 6 — Testing & Validation (IN PROGRESS)
+### 8.6 Phase 6 — Testing & Validation
 
 | # | Item | Status |
 |---|------|--------|
 | 44 | `test/smoke.sh` bash smoke tests | Done (337 lines, covers all phases) |
-| 45 | Full Pi extension startup | Blocked by pi-tau github-autocomplete stale ctx (fixed) |
-| 46 | SSE event flow tests | Pending integration test harness |
+| 45 | Full Pi extension startup | Fixed — use `--mode rpc` with open stdin pipe |
+| 46 | SSE event flow tests | **Done** — see §5.6 for harness docs |
 | 47 | P4OC end-to-end validation | Pending integration test harness |
 
 ### 8.7 Deferred Items
