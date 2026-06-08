@@ -1453,10 +1453,61 @@ export default function (pi: ExtensionAPI) {
         },
     });
 
+    // ── HTTP server startup (called immediately, no session_start dependency) ──
+
+    function startServer() {
+        if (httpServer) return;
+        httpServer = createServer(handleRequest);
+
+        httpServer.on("error", (err: any) => {
+            if (err.code === "EADDRINUSE") {
+                console.error(
+                    `[opencode-serve] Port ${port} already in use. Set --serve-port or PI_SERVE_PORT.`,
+                );
+            } else {
+                console.error("[opencode-serve] Server error:", err);
+            }
+        });
+
+        httpServer.listen(port, hostname, () => {
+            elog("server listening on http://" + hostname + ":" + port);
+            // UI notify deferred to first session_start (may not be available yet)
+        });
+
+        // SSE keepalive heartbeat every 30s
+        setInterval(() => {
+            const hb = `data: ${JSON.stringify({ directory: activeCwd, payload: { id: "evt_" + randomUUID(), type: "keepalive", properties: { time: nowUnix() } } })}\n\n`;
+            for (const res of sseClients) {
+                try {
+                    res.write(hb);
+                } catch {
+                    sseClients.delete(res);
+                }
+            }
+        }, 30000);
+
+        elog("HTTP server started (port " + port + ")");
+    }
+
+    // Start server immediately — works even when extension is loaded via /reload
+    // after initial session_start (Pi skips session_start on reload when hasBindings
+    // was never set because the extension was added after initial session).
+    startServer();
+
     // ── Lifecycle ──────────────────────────────────────────────────
 
     pi.on("session_start", async (event, ctx) => {
         activeCwd = ctx.cwd;
+
+        // Notify UI about the running server
+        if (httpServer) {
+            try {
+                ctx.ui.notify(`OpenCode API: http://${hostname}:${port}`, "info");
+                ctx.ui.setStatus("serve-api", `API :${port}`);
+            } catch {
+                // ctx may be stale in some reload scenarios
+            }
+        }
 
         // Verify command is registered
         try {
@@ -1501,39 +1552,6 @@ export default function (pi: ExtensionAPI) {
                 // Not a git repo, skip
             }
         })();
-
-        // Start HTTP server (once)
-        if (!httpServer) {
-            httpServer = createServer(handleRequest);
-
-            httpServer.on("error", (err: any) => {
-                if (err.code === "EADDRINUSE") {
-                    console.error(
-                        `[opencode-serve] Port ${port} already in use. Set --serve-port or PI_SERVE_PORT.`,
-                    );
-                } else {
-                    console.error("[opencode-serve] Server error:", err);
-                }
-            });
-
-            httpServer.listen(port, hostname, () => {
-                elog("server listening on http://" + hostname + ":" + port);
-                ctx.ui.notify(`OpenCode API: http://${hostname}:${port}`, "info");
-                ctx.ui.setStatus("serve-api", `API :${port}`);
-            });
-
-            // SSE keepalive heartbeat every 30s — wrapped in {directory, payload} for consistency
-            setInterval(() => {
-                const hb = `data: ${JSON.stringify({ directory: activeCwd, payload: { id: "evt_" + randomUUID(), type: "keepalive", properties: { time: nowUnix() } } })}\n\n`;
-                for (const res of sseClients) {
-                    try {
-                        res.write(hb);
-                    } catch {
-                        sseClients.delete(res);
-                    }
-                }
-            }, 30000);
-        }
     });
 
     // ── Pi → OpenCode event bridge ─────────────────────────────────

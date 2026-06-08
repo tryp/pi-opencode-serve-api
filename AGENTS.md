@@ -1,6 +1,6 @@
 # AGENTS.md — OpenCode Serve API (Pi Extension)
 
-> **Last updated**: 2026-06-08 — All 6 phases implemented. Fixed thinking_delta accumulation. See §8 for status.
+> **Last updated**: 2026-06-08 — All 6 phases implemented. Server starts immediately (no session_start dependency) for reload compatibility. See §8 for status.
 >
 > **IMPORTANT**: This file is the central agent guidance document. Keep it focused
 > on what agents need to know right now. Detailed reference content lives in
