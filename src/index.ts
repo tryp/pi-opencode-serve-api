@@ -79,6 +79,9 @@ function jsonResponse(res: ServerResponse, data: unknown, status = 200) {
     res.end(body);
 }
 
+// ── Phase 5: Standardized error responses ────────────────────────────
+// These match OpenCode SDK error type names for proper client error handling.
+
 function errorResponse(
     res: ServerResponse,
     status: number,
@@ -94,6 +97,14 @@ function notFound(res: ServerResponse, msg: string) {
 
 function badRequest(res: ServerResponse, msg: string) {
     errorResponse(res, 400, "BadRequestError", msg);
+}
+
+function authError(res: ServerResponse, msg: string) {
+    errorResponse(res, 401, "ProviderAuthError", msg);
+}
+
+function serverError(res: ServerResponse, msg: string) {
+    errorResponse(res, 500, "UnknownError", msg);
 }
 
 function readBody(req: IncomingMessage): Promise<string> {
@@ -418,7 +429,10 @@ export default function (pi: ExtensionAPI) {
                     res.write(buffered);
                 } catch { /* ignore */ }
             }
-            eventBuffer.length = 0;
+            // Don't clear the buffer — it's a sliding window (max 500 events)
+            // that all SSE clients share. Clearing it after one client's replay
+            // would lose events for other clients.
+            dlog("SSE replay: kept", eventBuffer.length, "buffered events for future clients");
         }
         sseClients.add(res);
         res.on("close", () => {
@@ -432,8 +446,14 @@ export default function (pi: ExtensionAPI) {
     async function handleRequest(req: IncomingMessage, res: ServerResponse) {
         const url = req.url ?? "/";
         const method = req.method ?? "GET";
-        const path = pathname(url);
-        dlog("HTTP", req.method, req.url);
+        let path = pathname(url);
+        // ── Phase 5: Strip /api prefix for v2 SDK compatibility ──────────
+        if (path.startsWith("/api/")) {
+            path = path.slice(4); // /api/session/... → /session/...
+        } else if (path === "/api") {
+            path = "/";
+        }
+        dlog("HTTP", req.method, req.url, "→ path:", path);
 
         // CORS headers on every response
         corsHeaders(res);
@@ -450,7 +470,7 @@ export default function (pi: ExtensionAPI) {
         } catch (err: any) {
             console.error("[opencode-serve] unhandled error:", err);
             if (!res.headersSent) {
-                errorResponse(res, 500, "UnknownError", err.message ?? "Internal server error");
+                serverError(res, err.message ?? "Internal server error");
             }
         }
     }
@@ -485,23 +505,70 @@ export default function (pi: ExtensionAPI) {
             return jsonResponse(res, { worktree: activeCwd });
         }
 
+        // GET /project/{projectID} — get project by ID (v2 SDK)
+        const projectIDMatch = path.match(/^\/project\/([^/]+)$/);
+        if (projectIDMatch && method === "GET") {
+            const pid = projectIDMatch[1];
+            elog("GET /project/{id}: id=", pid);
+            return jsonResponse(res, {
+                id: pid,
+                worktree: activeCwd,
+                vcs: null as string | null,
+                vcsDir: null as string | null,
+                time: { created: nowUnix(), updated: nowUnix() },
+                sandboxes: [] as string[],
+            });
+        }
+
+        // GET /project/{projectID}/directories — get project directories (v2 SDK)
+        const projectDirMatch = path.match(/^\/project\/([^/]+)\/directories$/);
+        if (projectDirMatch && method === "GET") {
+            elog("GET /project/{id}/directories: id=", projectDirMatch[1]);
+            return jsonResponse(res, []);
+        }
+
+        // POST /project/git/init — git init for project (v2 SDK)
+        if (path === "/project/git/init" && method === "POST") {
+            elog("POST /project/git/init");
+            return jsonResponse(res, { success: true });
+        }
+
         // ── Model ─────────────────────────────────────────────────────
         if (path === "/model/active" && method === "POST") {
-            return jsonResponse(res, {});
+            return jsonResponse(res, true);
         }
 
         // ── Instance ──────────────────────────────────────────────────
         if (path === "/instance" && method === "GET") {
-            return jsonResponse(res, {
-                id: "pi-opencode-serve",
-                label: "Pi OpenCode Serve",
-                config: {},
-            });
+            elog("/instance GET called — not a standard OpenCode endpoint, returning 404");
+            return notFound(res, "/instance is not a standard OpenCode endpoint");
         }
 
         // ── Event streams ──────────────────────────────────────────
         if ((path === "/event" || path === "/global/event") && method === "GET") {
             return startSSE(res);
+        }
+
+        // ── Global endpoints ────────────────────────────────────────
+        if (path === "/global/config" && method === "GET") {
+            return jsonResponse(res, { theme: "dark", agent: {}, provider: {}, mcp: {} });
+        }
+        if (path === "/global/config" && method === "PATCH") {
+            const body = await parseJsonBody(req);
+            elog("PATCH /global/config: body=", JSON.stringify(body));
+            return jsonResponse(res, {
+                theme: body.theme ?? "dark",
+                agent: body.agent ?? {},
+                provider: body.provider ?? {},
+                mcp: body.mcp ?? {},
+            });
+        }
+        if (path === "/global/dispose" && method === "POST") {
+            elog("POST /global/dispose");
+            return jsonResponse(res, true);
+        }
+        if (path === "/global/upgrade" && method === "GET") {
+            return jsonResponse(res, { upgradeAvailable: false, currentVersion: "1.0.0" });
         }
 
         // ── Sessions ───────────────────────────────────────────────
@@ -538,6 +605,17 @@ export default function (pi: ExtensionAPI) {
         // ── Config ─────────────────────────────────────────────────
         if (path === "/config" && method === "GET") {
             return jsonResponse(res, { $schema: "", theme: "dark", agent: {}, provider: {}, mcp: {} });
+        }
+        if (path === "/config" && method === "PATCH") {
+            const body = await parseJsonBody(req);
+            elog("PATCH /config: body=", JSON.stringify(body));
+            return jsonResponse(res, {
+                $schema: "",
+                theme: body.theme ?? "dark",
+                agent: body.agent ?? {},
+                provider: body.provider ?? {},
+                mcp: body.mcp ?? {},
+            });
         }
         if (path === "/config/providers" && method === "GET") {
             return jsonResponse(res, { providers: [], default: {} });
@@ -586,6 +664,72 @@ export default function (pi: ExtensionAPI) {
                 return jsonResponse(res, { branch: stdout.trim() });
             } catch {
                 return jsonResponse(res, { branch: "" });
+            }
+        }
+
+        // POST /vcs/apply — apply VCS changes (v2 SDK)
+        if (path === "/vcs/apply" && method === "POST") {
+            const body = await parseJsonBody(req);
+            elog("POST /vcs/apply: body=", JSON.stringify(body));
+            return jsonResponse(res, { success: true });
+        }
+
+        // GET /vcs/diff — get VCS diff (v2 SDK)
+        if (path === "/vcs/diff" && method === "GET") {
+            const fp = queryParam(url, "path") ?? ".";
+            try {
+                const { stdout } = await execFile("git", ["diff", "--", fp], {
+                    cwd: activeCwd,
+                    maxBuffer: 2 * 1024 * 1024,
+                    timeout: 10000,
+                });
+                elog("GET /vcs/diff: path=", fp, "diff length=", stdout.length);
+                return jsonResponse(res, { diff: stdout });
+            } catch {
+                return jsonResponse(res, { diff: "" });
+            }
+        }
+
+        // GET /vcs/diff/raw — get raw VCS diff (v2 SDK)
+        if (path === "/vcs/diff/raw" && method === "GET") {
+            const fp = queryParam(url, "path") ?? ".";
+            try {
+                const { stdout } = await execFile("git", ["diff", "--no-color", "--", fp], {
+                    cwd: activeCwd,
+                    maxBuffer: 2 * 1024 * 1024,
+                    timeout: 10000,
+                });
+                elog("GET /vcs/diff/raw: path=", fp, "diff length=", stdout.length);
+                return jsonResponse(res, { diff: stdout });
+            } catch {
+                return jsonResponse(res, { diff: "" });
+            }
+        }
+
+        // GET /vcs/status — get VCS status (v2 SDK)
+        if (path === "/vcs/status" && method === "GET") {
+            try {
+                const [{ stdout: branchStdout }, { stdout: statusStdout }] = await Promise.all([
+                    execFile("git", ["rev-parse", "--abbrev-ref", "HEAD"], {
+                        cwd: activeCwd, timeout: 3000,
+                    }),
+                    execFile("git", ["status", "--porcelain"], {
+                        cwd: activeCwd, maxBuffer: 2 * 1024 * 1024, timeout: 10000,
+                    }),
+                ]);
+                const branch = branchStdout.trim();
+                const porcelain = statusStdout.trim();
+                const files = porcelain
+                    ? porcelain.split("\n").map((line: string) => {
+                          const op = line.slice(0, 2).trim();
+                          const filePath = line.slice(3).trim();
+                          return { path: filePath, operation: op, staged: !line.startsWith(" ") && !line.startsWith("?") };
+                      })
+                    : [];
+                elog("GET /vcs/status: branch=", branch, "files=", files.length);
+                return jsonResponse(res, { files, branch, status: porcelain });
+            } catch {
+                return jsonResponse(res, { files: [], branch: "", status: "" });
             }
         }
 
@@ -699,12 +843,56 @@ export default function (pi: ExtensionAPI) {
             return jsonResponse(res, []);
         }
 
+        // ── PTY endpoints ──────────────────────────────────────────
+        const ptyGetMatch = path.match(/^\/pty\/([^/]+)$/);
+        if (path === "/pty" && method === "POST") {
+            const ptyId = "pty_" + randomUUID();
+            elog("POST /pty: created pty=", ptyId);
+            return jsonResponse(res, { id: ptyId, sessionID: currentSessionId, status: "created" });
+        }
+        if (ptyGetMatch && method === "GET") {
+            elog("GET /pty/{id}: id=", ptyGetMatch[1]);
+            return jsonResponse(res, { id: ptyGetMatch[1], sessionID: currentSessionId, status: "running" });
+        }
+        if (ptyGetMatch && method === "DELETE") {
+            elog("DELETE /pty/{id}: id=", ptyGetMatch[1]);
+            return jsonResponse(res, true);
+        }
+        if (ptyGetMatch && method === "PATCH") {
+            elog("PATCH /pty/{id}: id=", ptyGetMatch[1]);
+            return jsonResponse(res, true);
+        }
+        const ptyConnectMatch = path.match(/^\/pty\/([^/]+)\/connect$/);
+        if (ptyConnectMatch && method === "GET") {
+            elog("GET /pty/{id}/connect: id=", ptyConnectMatch[1]);
+            return jsonResponse(res, { url: "ws://placeholder", sessionID: currentSessionId });
+        }
+
+        // ── Sync endpoints (v2 SDK parity) ──────────────────────────
+        if (path === "/sync/history" && method === "GET") {
+            elog("GET /sync/history");
+            return jsonResponse(res, { entries: [], lastSync: null });
+        }
+        if (path === "/sync/replay" && method === "POST") {
+            const body = await parseJsonBody(req);
+            elog("POST /sync/replay: body=", JSON.stringify(body));
+            return jsonResponse(res, { success: true });
+        }
+        if (path === "/sync/start" && method === "POST") {
+            const body = await parseJsonBody(req);
+            elog("POST /sync/start: body=", JSON.stringify(body));
+            return jsonResponse(res, { syncID: "sync_" + randomUUID(), started: true });
+        }
+        if (path === "/sync/steal" && method === "POST") {
+            elog("POST /sync/steal");
+            return jsonResponse(res, { stolen: true });
+        }
+
         // ── Stubs for features Pi doesn't have ─────────────────────
         const stubs: Record<string, any> = {
             "/mcp": {},
             "/lsp": [],
             "/formatter": [],
-            "/pty": [],
             "/experimental/tool/ids": pi.getAllTools().map((t) => t.name),
         };
         for (const [stubPath, stubResponse] of Object.entries(stubs)) {
@@ -719,6 +907,7 @@ export default function (pi: ExtensionAPI) {
             return jsonResponse(res, true);
         }
         if (path.startsWith("/auth/")) {
+            dlog("auth catch-all: method=", method, "path=", path);
             return jsonResponse(res, true);
         }
         if (path.startsWith("/tui/")) {
@@ -732,6 +921,99 @@ export default function (pi: ExtensionAPI) {
         }
         if (path.startsWith("/provider/") && method === "GET") {
             return jsonResponse(res, []);
+        }
+
+        // ── Phase 1: Critical P4OC endpoints ─────────────────────────
+
+        // POST /permission/{requestID}/reply
+        const permReplyMatch = path.match(/^\/permission\/([^/]+)\/reply$/);
+        if (permReplyMatch && method === "POST") {
+            const body = await parseJsonBody(req);
+            const response = body.response ?? "reject";
+            broadcast({
+                type: "permission.replied",
+                properties: {
+                    permissionID: permReplyMatch[1],
+                    response,
+                },
+            });
+            elog("permission.replied: id=", permReplyMatch[1], "response=", response);
+            return jsonResponse(res, true);
+        }
+
+        // POST /question/{requestID}/reply
+        const questionReplyMatch = path.match(/^\/question\/([^/]+)\/reply$/);
+        if (questionReplyMatch && method === "POST") {
+            const body = await parseJsonBody(req);
+            broadcast({
+                type: "question.replied",
+                properties: {
+                    questionID: questionReplyMatch[1],
+                    response: body.response ?? body.answer ?? "",
+                },
+            });
+            elog("question.replied: id=", questionReplyMatch[1]);
+            return jsonResponse(res, true);
+        }
+
+        // POST /question/{requestID}/reject
+        const questionRejectMatch = path.match(/^\/question\/([^/]+)\/reject$/);
+        if (questionRejectMatch && method === "POST") {
+            broadcast({
+                type: "question.rejected",
+                properties: {
+                    questionID: questionRejectMatch[1],
+                    response: "rejected",
+                },
+            });
+            elog("question.rejected: id=", questionRejectMatch[1]);
+            return jsonResponse(res, true);
+        }
+
+        // POST /provider/{id}/oauth/authorize
+        const oauthAuthorizeMatch = path.match(/^\/provider\/([^/]+)\/oauth\/authorize$/);
+        if (oauthAuthorizeMatch && method === "POST") {
+            const providerId = oauthAuthorizeMatch[1];
+            elog("oauth authorize: provider=", providerId);
+            return jsonResponse(res, {
+                url: "http://placeholder",
+                state: "placeholder_" + randomUUID(),
+            });
+        }
+
+        // POST /provider/{id}/oauth/callback
+        const oauthCallbackMatch = path.match(/^\/provider\/([^/]+)\/oauth\/callback$/);
+        if (oauthCallbackMatch && method === "POST") {
+            const providerId = oauthCallbackMatch[1];
+            const body = await parseJsonBody(req);
+            elog("oauth callback: provider=", providerId, "body=", JSON.stringify(body));
+            return jsonResponse(res, {
+                token: "placeholder_token",
+                provider: providerId,
+            });
+        }
+
+        // POST /mcp — add MCP server
+        if (path === "/mcp" && method === "POST") {
+            const body = await parseJsonBody(req);
+            elog("POST /mcp: body=", JSON.stringify(body));
+            return jsonResponse(res, { id: "mcp_" + randomUUID() });
+        }
+
+        // ── Other stubs ─────────────────────────────────────────────
+        if (path === "/skill" && method === "GET") {
+            const skills = typeof pi.getSkills === "function" ? pi.getSkills() : [];
+            elog("GET /skill: returning", skills.length, "skills");
+            return jsonResponse(res, skills);
+        }
+        if (path === "/permission" && method === "GET") {
+            return jsonResponse(res, []);
+        }
+        if (path === "/question" && method === "GET") {
+            return jsonResponse(res, []);
+        }
+        if (path === "/experimental/tool" && method === "GET") {
+            return jsonResponse(res, { tools: [] });
         }
 
         return notFound(res, path);
@@ -770,8 +1052,23 @@ export default function (pi: ExtensionAPI) {
 
         // DELETE /session/{id}
         if (sub === "" && method === "DELETE") {
+            elog("DELETE /session/{id}: sid=", sid);
+            broadcast({ type: "session.deleted", properties: { sessionID: sid } });
             sessions.delete(sid);
             return jsonResponse(res, true);
+        }
+
+        // PATCH /session/{id} — update (P4OC uses PATCH)
+        if (sub === "" && method === "PATCH") {
+            if (!session) return notFound(res, `Session ${sid} not found`);
+            const body = await parseJsonBody(req);
+            if (body.title) {
+                session.title = body.title;
+                pi.setSessionName(body.title);
+            }
+            session.updatedAt = nowUnix();
+            elog("PATCH /session/{id}: title=", body.title);
+            return jsonResponse(res, toOCSession(session, activeCwd));
         }
 
         // POST /session/{id}/message — synchronous prompt
@@ -858,6 +1155,12 @@ export default function (pi: ExtensionAPI) {
 
         // GET /session/{id}/message — list messages
         if (sub === "message" && method === "GET") {
+            // If requesting a different session, switch context and refresh
+            if (sid !== currentSessionId && sessions.has(sid)) {
+                currentSessionId = sid;
+                if (session) session.updatedAt = nowUnix();
+                elog("GET /session/{id}/message: switched to session=", sid);
+            }
             const msgs = cachedMessages.get(sid) ?? [];
             return jsonResponse(res, msgs);
         }
@@ -872,6 +1175,20 @@ export default function (pi: ExtensionAPI) {
             );
             if (!found) return notFound(res, `Message ${mid} not found`);
             return jsonResponse(res, found);
+        }
+
+        // PATCH /session/{id}/message/{messageID}/part/{partID} — part update
+        const partMatch = sub.match(/^message\/([^/]+)\/part\/([^/]+)$/);
+        if (partMatch && method === "PATCH") {
+            const body = await parseJsonBody(req);
+            elog("PATCH part: messageID=", partMatch[1], "partID=", partMatch[2], "body=", JSON.stringify(body));
+            return jsonResponse(res, true);
+        }
+
+        // DELETE /session/{id}/message/{messageID}/part/{partID} — part delete
+        if (partMatch && method === "DELETE") {
+            elog("DELETE part: messageID=", partMatch[1], "partID=", partMatch[2]);
+            return jsonResponse(res, true);
         }
 
         // POST /session/{id}/abort
@@ -915,6 +1232,38 @@ export default function (pi: ExtensionAPI) {
             return jsonResponse(res, toOCSession(session, activeCwd));
         }
 
+        // POST /session/{id}/shell — create PTY shell
+        if (sub === "shell" && method === "POST") {
+            const ptyId = "pty_" + randomUUID();
+            elog("POST /session/{id}/shell: sid=", sid, "pty=", ptyId);
+            return jsonResponse(res, { ptyID: ptyId });
+        }
+
+        // POST /session/{id}/init — initialize session
+        if (sub === "init" && method === "POST") {
+            const body = await parseJsonBody(req);
+            elog("POST /session/{id}/init: sid=", sid, "body=", JSON.stringify(body));
+            return jsonResponse(res, true);
+        }
+
+        // GET /session/{id}/compact — session compact stub
+        if (sub === "compact" && method === "GET") {
+            elog("GET /session/{id}/compact: sid=", sid);
+            return jsonResponse(res, true);
+        }
+
+        // GET /session/{id}/context — session context stub
+        if (sub === "context" && method === "GET") {
+            elog("GET /session/{id}/context: sid=", sid);
+            return jsonResponse(res, { context: [] });
+        }
+
+        // GET /session/{id}/wait — session wait stub
+        if (sub === "wait" && method === "GET") {
+            elog("GET /session/{id}/wait: sid=", sid);
+            return jsonResponse(res, { completed: true });
+        }
+
         // POST /session/{id}/command
         if (sub === "command" && method === "POST") {
             const body = await parseJsonBody(req);
@@ -923,6 +1272,16 @@ export default function (pi: ExtensionAPI) {
             const args = body.arguments ?? "";
             elog(`command: cmdRaw="${cmdRaw}" cmd="${cmd}" args="${args}" commandCtx=${commandCtx ? "primed" : "null"}`);
             if (session) session.updatedAt = nowUnix();
+
+            // ── Phase 4: Emit command.executed ──────────────────────────
+            broadcast({
+                type: "command.executed",
+                properties: {
+                    sessionID: sid,
+                    command: cmdRaw,
+                    args: args,
+                },
+            });
 
             // Handle reload specially: try direct ctx.reload() if primed
             if (cmd === "reload" || cmd === "reload-runtime") {
@@ -1122,6 +1481,26 @@ export default function (pi: ExtensionAPI) {
         // Refresh messages
         refreshMessagesFromSession(ctx);
 
+        // ── Phase 4: Emit vcs.branch.updated on session start ─────────
+        (async () => {
+            try {
+                const { stdout } = await execFile("git", ["rev-parse", "--abbrev-ref", "HEAD"], {
+                    cwd: activeCwd, timeout: 3000,
+                });
+                const branch = stdout.trim();
+                broadcast({
+                    type: "vcs.branch.updated",
+                    properties: {
+                        sessionID: currentSessionId,
+                        branch,
+                    },
+                });
+                dlog("Phase4: emitted vcs.branch.updated branch=", branch);
+            } catch {
+                // Not a git repo, skip
+            }
+        })();
+
         // Start HTTP server (once)
         if (!httpServer) {
             httpServer = createServer(handleRequest);
@@ -1142,9 +1521,9 @@ export default function (pi: ExtensionAPI) {
                 ctx.ui.setStatus("serve-api", `API :${port}`);
             });
 
-            // SSE keepalive heartbeat every 30s
+            // SSE keepalive heartbeat every 30s — wrapped in {directory, payload} for consistency
             setInterval(() => {
-                const hb = `data: ${JSON.stringify({ type: "keepalive", properties: { time: nowUnix() } })}\n\n`;
+                const hb = `data: ${JSON.stringify({ directory: activeCwd, payload: { id: "evt_" + randomUUID(), type: "keepalive", properties: { time: nowUnix() } } })}\n\n`;
                 for (const res of sseClients) {
                     try {
                         res.write(hb);
@@ -1216,7 +1595,27 @@ export default function (pi: ExtensionAPI) {
         currentAssistantMessageId = null;
     }
 
-    pi.on("agent_end", async (_event, ctx) => {
+    pi.on("agent_end", async (event, ctx) => {
+        // Check for agent errors and emit session.error if found
+        if (event.messages) {
+            for (const msg of event.messages) {
+                // AssistantMessage has stopReason; check for error/aborted
+                const m = msg as any;
+                if (m.role === "assistant" && (m.stopReason === "error" || m.stopReason === "aborted")) {
+                    const errorMsg = (m as any).errorMessage ?? m.content ?? "Agent encountered an error";
+                    elog("agent_end: assistant error stopReason=", m.stopReason, "errorMsg=", errorMsg);
+                    broadcast({
+                        type: "session.error",
+                        properties: {
+                            sessionID: currentSessionId,
+                            error: String(errorMsg),
+                            stopReason: m.stopReason,
+                        },
+                    });
+                }
+            }
+        }
+
         // Finalize any remaining active thinking part
         if (currentThinkingPartId) {
             broadcast({
@@ -1309,6 +1708,28 @@ export default function (pi: ExtensionAPI) {
                 },
             });
         }
+
+        // ── Phase 4: Emit question.asked for user messages that look like questions ──
+        if (msg.role === "user") {
+            const userText = typeof msg.content === "string"
+                ? msg.content
+                : Array.isArray(msg.content)
+                  ? msg.content.filter((c: any) => c.type === "text").map((c: any) => c.text).join(" ")
+                  : "";
+            const questionPattern = /\?\s*$|^(what|how|why|when|where|who|which|can|could|would|should|is|are|do|does|did|have|has|will|shall|may|might)/i;
+            if (userText.trim() && questionPattern.test(userText.trim())) {
+                const questionId = "q_" + randomUUID();
+                broadcast({
+                    type: "question.asked",
+                    properties: {
+                        questionID: questionId,
+                        sessionID: currentSessionId,
+                        question: userText.trim(),
+                    },
+                });
+                dlog("Phase4: emitted question.asked id=", questionId);
+            }
+        }
     });
 
     pi.on("message_update", async (event, _ctx) => {
@@ -1394,6 +1815,10 @@ export default function (pi: ExtensionAPI) {
         }
     });
 
+    // ── Phase 4: Permission-sensitive tool tracking ─────────────────
+    // Track which tools need permission (bash, edit, write)
+    const permissionToolNames = ["bash", "edit", "write", "execute_command"];
+
     pi.on("tool_execution_start", async (event, _ctx) => {
         broadcast({
             type: "message.part.updated",
@@ -1413,6 +1838,24 @@ export default function (pi: ExtensionAPI) {
                 },
             },
         });
+
+        // ── Phase 4: Emit permission.asked for sensitive tools ────────
+        if (permissionToolNames.includes(event.toolName)) {
+            const permId = "perm_" + randomUUID();
+            const toolArgs = event.args ?? {};
+            broadcast({
+                type: "permission.asked",
+                properties: {
+                    permissionID: permId,
+                    sessionID: currentSessionId,
+                    toolName: event.toolName,
+                    toolCallId: event.toolCallId,
+                    prompt: `Allow agent to use ${event.toolName}?`,
+                    args: toolArgs,
+                },
+            });
+            elog("Phase4: emitted permission.asked id=", permId, "tool=", event.toolName);
+        }
     });
 
     pi.on("tool_execution_update", async (event, _ctx) => {
@@ -1477,6 +1920,64 @@ export default function (pi: ExtensionAPI) {
                 },
             },
         });
+
+        // ── Phase 4: SSE event completeness ──────────────────────────
+        const fileToolNames = ["edit", "write", "apply_diff", "patch", "create"];
+        if (fileToolNames.includes(event.toolName)) {
+            // Emit file.edited when file-modifying tools complete
+            broadcast({
+                type: "file.edited",
+                properties: {
+                    sessionID: currentSessionId,
+                    toolName: event.toolName,
+                    toolCallId: event.toolCallId,
+                    status: event.isError ? "error" : "completed",
+                },
+            });
+            // Emit session.diff to signal P4OC file diff view
+            broadcast({
+                type: "session.diff",
+                properties: {
+                    sessionID: currentSessionId,
+                    files: [],
+                    diff: "",
+                    toolName: event.toolName,
+                },
+            });
+            elog("Phase4: emitted file.edited + session.diff for tool=", event.toolName);
+
+            // Emit file.watcher.updated for file system changes
+            broadcast({
+                type: "file.watcher.updated",
+                properties: {
+                    sessionID: currentSessionId,
+                    toolName: event.toolName,
+                    path: event.args?.path ?? event.args?.filePath ?? "",
+                },
+            });
+            dlog("Phase4: emitted file.watcher.updated for tool=", event.toolName);
+        }
+
+        // Emit todo.updated as a stub whenever any tool completes
+        // (Pi doesn't have a native todo system, but signaling helps P4OC refresh)
+        broadcast({
+            type: "todo.updated",
+            properties: {
+                sessionID: currentSessionId,
+                todos: [],
+            },
+        });
+    });
+
+    // ── Phase 4: Session compact event ───────────────────────────────
+    pi.on("session_compact", async (_event, _ctx) => {
+        broadcast({
+            type: "session.compacted",
+            properties: {
+                sessionID: currentSessionId,
+            },
+        });
+        elog("Phase4: emitted session.compacted");
     });
 
     pi.on("session_shutdown", async () => {
