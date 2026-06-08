@@ -330,6 +330,7 @@ export default function (pi: ExtensionAPI) {
     const eventBuffer: string[] = [];
     let currentThinkingPartId: string | null = null;
     let currentThinkingStartTime: number = 0;
+    let currentThinkingText: string = "";
     let currentTextPartId: string | null = null;
     let currentAssistantMessageId: string | null = null;
     let httpServer: Server | undefined;
@@ -1540,6 +1541,7 @@ export default function (pi: ExtensionAPI) {
     pi.on("agent_start", async (_event, ctx) => {
         refreshMessagesFromSession(ctx);
         currentThinkingPartId = null;
+        currentThinkingText = "";
         currentTextPartId = null;
         // Broadcast an initial assistant message.updated so P4OC creates the message placeholder
         broadcast({
@@ -1634,6 +1636,7 @@ export default function (pi: ExtensionAPI) {
         }
         currentThinkingPartId = null;
         currentThinkingStartTime = 0;
+        currentThinkingText = "";
         currentTextPartId = null;
         refreshMessagesFromSession(ctx);
         const completedMsgId = currentAssistantMessageId;
@@ -1753,6 +1756,8 @@ export default function (pi: ExtensionAPI) {
                 });
             }
             currentThinkingPartId = null;
+            currentThinkingStartTime = 0;
+            currentThinkingText = "";
             if (!currentTextPartId) {
                 currentTextPartId = randomUUID();
             }
@@ -1775,7 +1780,9 @@ export default function (pi: ExtensionAPI) {
             if (!currentThinkingPartId) {
                 currentThinkingPartId = randomUUID();
                 currentThinkingStartTime = nowUnix();
+                currentThinkingText = "";
             }
+            currentThinkingText += delta.delta;
             broadcast({
                 type: "message.part.updated",
                 properties: {
@@ -1784,15 +1791,17 @@ export default function (pi: ExtensionAPI) {
                         sessionID: currentSessionId,
                         messageID: currentAssistantMessageId ?? randomUUID(),
                         type: "reasoning",
-                        text: delta.delta,
+                        text: currentThinkingText,
                         time: { start: currentThinkingStartTime },
                     },
+                    delta: delta.delta,
                 },
             });
         }
 
         if (delta.type === "toolcall_start" && delta.toolCall) {
             currentThinkingPartId = null;
+            currentThinkingText = "";
             currentTextPartId = null;
             broadcast({
                 type: "message.part.updated",
