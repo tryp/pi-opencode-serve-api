@@ -311,6 +311,20 @@ function entriesToOCMessages(
 // ── Main extension ─────────────────────────────────────────────────────
 
 export default function (pi: ExtensionAPI) {
+    // ── Register flags first ──────────────────────────────────────────
+    // Must happen before any pi.getFlag() calls, otherwise pi's built-in
+    // flags with the same names (defaulting to 3334) will leak through.
+    pi.registerFlag("serve-port", {
+        description: "HTTP port for the OpenCode-compatible serve API (default: 4096)",
+        type: "string",
+        default: "4096",
+    });
+    pi.registerFlag("serve-host", {
+        description: "Bind host for the serve API (default: 127.0.0.1)",
+        type: "string",
+        default: "127.0.0.1",
+    });
+
     // ── Config ────────────────────────────────────────────────────────
     const port = parseInt(
         (process.env.PI_SERVE_PORT as string) ??
@@ -334,6 +348,7 @@ export default function (pi: ExtensionAPI) {
     let currentTextPartId: string | null = null;
     let currentAssistantMessageId: string | null = null;
     let httpServer: Server | undefined;
+    let serverListening = false;
     let commandCtx: any = null;
     let activeCwd: string = process.cwd();
 
@@ -1405,20 +1420,6 @@ export default function (pi: ExtensionAPI) {
         }
     }
 
-    // ── Register flags ─────────────────────────────────────────────
-
-    pi.registerFlag("serve-port", {
-        description: "HTTP port for the OpenCode-compatible serve API (default: 4096)",
-        type: "string",
-        default: "4096",
-    });
-
-    pi.registerFlag("serve-host", {
-        description: "Bind host for the serve API (default: 127.0.0.1)",
-        type: "string",
-        default: "127.0.0.1",
-    });
-
     // ── Register commands ──────────────────────────────────────────
 
     pi.registerCommand("serve-api", {
@@ -1470,8 +1471,8 @@ export default function (pi: ExtensionAPI) {
         });
 
         httpServer.listen(port, hostname, () => {
+            serverListening = true;
             elog("server listening on http://" + hostname + ":" + port);
-            // UI notify deferred to first session_start (may not be available yet)
         });
 
         // SSE keepalive heartbeat every 30s
@@ -1499,8 +1500,8 @@ export default function (pi: ExtensionAPI) {
     pi.on("session_start", async (event, ctx) => {
         activeCwd = ctx.cwd;
 
-        // Notify UI about the running server
-        if (httpServer) {
+        // Notify UI about the running server (only after listen callback)
+        if (serverListening) {
             try {
                 ctx.ui.notify(`OpenCode API: http://${hostname}:${port}`, "info");
                 ctx.ui.setStatus("serve-api", `API :${port}`);
